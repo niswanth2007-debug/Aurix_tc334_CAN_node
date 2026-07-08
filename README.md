@@ -1,17 +1,10 @@
-# AURIX TC334 CAN Transmission Demo
+# AURIX TC334 Keypad-to-CAN Transmitter
 
-A CAN bus transmission project built on the Infineon AURIX TC334 Lite Kit, using the on-chip CAN peripheral (IfxCan) to send data over the CAN bus and verify it via an internal loopback test and an external USB-CAN-FD-B analyzer.
+Reads key presses from a matrix keypad on the Infineon AURIX TC334 Lite Kit and transmits the corresponding digit over CAN, with onboard LEDs used as heartbeat/status indicators.
 
 ## Overview
 
-This project transmits a single byte (`'a'`) over CAN from the AURIX TC334 and confirms successful transmission in two stages:
-
-1. **Loopback test** — the TC334's CAN node is configured with `busLoopbackEnabled = TRUE`, so it transmits and immediately receives its own frame internally, with no external wiring required. This isolates whether the CAN peripheral itself is functioning correctly, independent of external bus wiring, termination, or a connected receiver.
-2. **External bus verification** — once loopback confirms the peripheral works, the board is wired to a USB-CAN-FD-B analyzer running CANFDToolPro to confirm the frame is actually visible on the physical bus.
-
-An onboard LED provides visual feedback:
-- **3 fast blinks, repeating** → loopback succeeded, frame was transmitted and received correctly, CAN peripheral works
-- **1 slow blink, repeating** → loopback failed, CAN peripheral/init issue to debug further
+On each keypress, the number is sent as a CAN frame (ID `0x123`, standard frame, 8-byte data field, first byte = ASCII digit). This builds on an earlier loopback-verified CAN transmit base — the CAN peripheral itself was already confirmed working via internal loopback before this keypad integration was added.
 
 ## Hardware Used
 
@@ -19,54 +12,66 @@ An onboard LED provides visual feedback:
 |---|---|
 | Infineon AURIX TC334 Lite Kit | Main MCU, CAN0 peripheral |
 | TLE9251VSI CAN transceiver | Physical layer CAN transceiver |
+| 4x4 matrix keypad | Digit input |
 | USB-CAN-FD-B (with CANFDToolPro) | External CAN bus analyzer/monitor |
-| Onboard LED | Visual pass/fail indicator |
+| 2 onboard LEDs | Heartbeat + TX-attempt indicators |
 
 ## Pin Mapping
 
 | Signal | Pin |
 |---|---|
-| LED | P00.6 |
+| LED 1 (heartbeat) | P00.5 |
+| LED 2 (TX attempted) | P00.6 |
 | CAN TX | P20.8 |
 | CAN RX | P20.7 |
 | Transceiver STB (standby) | P20.9 |
+| Keypad Row 0 | P02.0 |
+| Keypad Row 1 | P02.1 |
+| Keypad Col 0 | P02.2 |
+| Keypad Col 1 | P02.3 |
 
 ## CAN Configuration
 
 - Baud rate: 500 kbps
 - Sample point: 80%
-- Frame type: Classic CAN, standard ID
-- Message ID: `0x100`
-- Data length: 1 byte
+- Frame type: transmit only, Classic CAN, standard ID
+- Message ID: `0x123`
+- Data length: 8 bytes (first byte carries the ASCII digit, rest zeroed)
+- 1 dedicated TX buffer
 
 ## How It Works
 
-`Can_init()` configures CAN0, Node 0, with dedicated TX/RX buffers and loopback mode enabled. `Can_sendAndReceive()` transmits a byte and then polls the RX buffer for the same message ID, returning the received byte. The main loop compares the received byte against the sent byte and drives the LED pattern accordingly.
+`CAN_init()` wakes the TLE9251VSI transceiver by driving `CAN_STB` (P20.9) low, then configures CAN0 Node 0 as a transmit-only node with one dedicated TX buffer at message ID `0x123`.
 
-## Debugging Notes
+`Keypad_scan()` drives each row low in turn and reads the column pins (active-low, pulled up) to detect which key is pressed, returning `KEY_NONE` if nothing is pressed.
 
-An earlier version relied on a raw send-timeout (`Can_sendByte`) that exited the wait loop after ~100,000 cycles regardless of whether an ACK was received. This meant the LED blinking only confirmed that code execution passed the send call — **not** that a frame was successfully placed on the bus, since CAN requires a receiver to ACK the frame. The loopback test was added specifically to get an unambiguous, wiring-independent confirmation that the TC334's CAN peripheral was transmitting and receiving correctly, before spending further time on external bus wiring, grounding, and termination.
+In the main loop, whenever `Keypad_scan()` returns a key other than `KEY_NONE`:
+1. The key value is converted to its ASCII digit (`'0' + keyPressed`) and placed in the TX data buffer.
+2. LED 1 toggles as a heartbeat.
+3. `IfxCan_Can_sendMessage()` is called, retrying up to 1000 times if the buffer is busy.
+4. LED 2 toggles to indicate a transmit attempt was made.
+5. A ~500 ms debounce delay follows before the next scan.
 
-## Current Status
+## Current Status / Known Limitations
 
-- [x] Loopback test implemented and passing
-- [ ] External bus wiring (GND, 120Ω termination) confirmed with USB-CAN-FD-B / CANFDToolPro
-- [ ] Screenshot of received frame in CANFDToolPro
+- The keypad hardware is a 4x4 matrix, but the current `Keypad_scan()` implementation only drives 2 rows and reads 2 columns, so only 4 keys (`1`, `2`, `4`, `5`) are currently mapped and scanned. Extending to the full 4x4 grid (4 rows × 4 columns) is a straightforward next step.
+- CAN transmission uses a retry-count timeout rather than blocking on ACK, consistent with the earlier loopback-verified base.
+- External bus verification via USB-CAN-FD-B / CANFDToolPro (GND connection, 120Ω termination, Channel 1 started) should be confirmed and screenshotted before considering this feature-complete.
 
 ## Build Instructions
 
 1. Open the project in AURIX Development Studio.
-2. Build using the TASKING compiler toolchain (default for AURIX Development Studio).
+2. Build using the TASKING compiler toolchain.
 3. Flash to the TC334 Lite Kit.
-4. Observe the onboard LED for the loopback result.
-5. (Optional) Connect to a USB-CAN-FD-B analyzer, start Channel 1 in CANFDToolPro with 120Ω termination enabled, and verify frames with ID `0x100` appear on the bus.
+4. Press keys on the keypad and observe LED 1 (heartbeat) and LED 2 (TX attempted) toggling.
+5. Connect a USB-CAN-FD-B analyzer, start Channel 1 in CANFDToolPro with 120Ω termination enabled, and verify frames with ID `0x123` appear on the bus when keys are pressed.
 
 ## Files
 
 ```
-aurix-tc334-can-transmit/
+aurix-tc334-keypad-can/
 ├── README.md
 ├── Cpu0_Main.c
-├── Can.c
-└── Can.h
+├── Can.c / Can.h
+├── Keypad.c / Keypad.h
 ```
